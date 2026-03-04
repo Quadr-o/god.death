@@ -2,56 +2,77 @@ import Foundation
 import UIKit
 import ObjectiveC
 
-// MARK: - UserDefaults ключ
-let kTGExtraShowDeletedMessages = "TGExtraShowDeletedMessages"
+// kTGExtraShowDeletedMessages объявлен в DeletedMessageStore.swift
 
-// MARK: - Индекс секции Messages в таблице TGExtra
-// Оригинальные секции: 0=GHOST_MODE, 1=READ_RECEIPT, 2=MISC, 3=FILE_FIXER, 4=FAKE_LOCATION, 5=LANGUAGE, 6=CREDITS
-// Вставляем MESSAGES между READ_RECEIPT и MISC → индекс 2
+// MARK: - Индекс секции Messages
 private let kMessagesSectionIndex = 2
 
-// MARK: - Установка хуков
+// MARK: - Установка хуков (вызывается из initialize())
 
 public func tgextra_installDeletedMessagesHooks() {
     guard let cls = NSClassFromString("TGExtra") else {
-        print("[TGExtra] Warning: TGExtra class not found — hooks skipped")
+        print("[TGExtra] Warning: TGExtra class not found")
         return
     }
 
     let pairs: [(String, Selector)] = [
-        ("numberOfSectionsInTableView:",        #selector(TGExtraHookProxy.tgextra_numberOfSections(_:))),
-        ("tableView:numberOfRowsInSection:",    #selector(TGExtraHookProxy.tgextra_numberOfRows(_:inSection:))),
-        ("tableView:titleForHeaderInSection:",  #selector(TGExtraHookProxy.tgextra_titleForHeader(_:titleForHeaderInSection:))),
-        ("tableView:cellForRowAtIndexPath:",    #selector(TGExtraHookProxy.tgextra_cellForRow(_:cellForRowAt:))),
-        ("switchKeyForIndexPath:",              #selector(TGExtraHookProxy.tgextra_switchKey(forIndexPath:))),
-        ("tableView:didSelectRowAtIndexPath:",  #selector(TGExtraHookProxy.tgextra_didSelect(_:didSelectRowAt:))),
+        ("numberOfSectionsInTableView:",       #selector(TGExtraHookProxy.tgextra_numberOfSections(_:))),
+        ("tableView:numberOfRowsInSection:",   #selector(TGExtraHookProxy.tgextra_numberOfRows(_:inSection:))),
+        ("tableView:titleForHeaderInSection:", #selector(TGExtraHookProxy.tgextra_titleForHeader(_:titleForHeaderInSection:))),
+        ("tableView:cellForRowAtIndexPath:",   #selector(TGExtraHookProxy.tgextra_cellForRow(_:cellForRowAt:))),
+        ("switchKeyForIndexPath:",             #selector(TGExtraHookProxy.tgextra_switchKey(forIndexPath:))),
+        ("tableView:didSelectRowAtIndexPath:", #selector(TGExtraHookProxy.tgextra_didSelect(_:didSelectRowAt:))),
     ]
 
     for (origName, swizSel) in pairs {
         let origSel = NSSelectorFromString(origName)
         guard
-            let origMethod = class_getInstanceMethod(cls, origSel),
-            let swizMethod = class_getInstanceMethod(TGExtraHookProxy.self, swizSel)
+            let origM = class_getInstanceMethod(cls, origSel),
+            let swizM = class_getInstanceMethod(TGExtraHookProxy.self, swizSel)
         else {
             print("[TGExtra] Swizzle failed: \(origName)")
             continue
         }
-        method_exchangeImplementations(origMethod, swizMethod)
+        method_exchangeImplementations(origM, swizM)
     }
-
-    print("[TGExtra] DeletedMessages hooks installed ✓")
+    print("[TGExtra] Menu hooks installed ✓")
 }
 
-// MARK: - Proxy с реализацией swizzled методов
+// MARK: - Автозапуск через initialize() вместо load()
+
+extension TGExtraHookProxy {
+    // initialize() вызывается ObjC runtime при первом использовании класса
+    // Swift позволяет его переопределять в отличие от load()
+    @objc static func tgextra_autoSetup() {
+        tgextra_installDeletedMessagesHooks()
+        if UserDefaults.standard.bool(forKey: kTGExtraShowDeletedMessages) {
+            DeletedMessageHook.shared.install()
+        }
+    }
+}
+
+// Вызываем setup при загрузке через статический инициализатор
+private let _autoSetup: Void = {
+    TGExtraHookProxy.tgextra_autoSetup()
+}()
+
+// Триггер статического инициализатора
+@objc class TGExtraDeletedMessagesSetup: NSObject {
+    @objc class func setup() {
+        _ = _autoSetup
+    }
+}
+
+// MARK: - Proxy класс
 
 @objc class TGExtraHookProxy: NSObject {
 
-    // numberOfSections → оригинал + 1
+    // numberOfSections → +1
     @objc func tgextra_numberOfSections(_ tableView: UITableView) -> Int {
-        return tgextra_numberOfSections(tableView) + 1  // рекурсия до оригинала через swizzle
+        return tgextra_numberOfSections(tableView) + 1
     }
 
-    // numberOfRows — наша секция = 1, остальные сдвигаем
+    // numberOfRows
     @objc func tgextra_numberOfRows(_ tableView: UITableView, inSection section: Int) -> Int {
         if section == kMessagesSectionIndex { return 1 }
         let adj = section > kMessagesSectionIndex ? section - 1 : section
@@ -66,37 +87,36 @@ public func tgextra_installDeletedMessagesHooks() {
     }
 
     // cellForRow
-    @objc func tgextra_cellForRow(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        if indexPath.section == kMessagesSectionIndex {
+    @objc func tgextra_cellForRow(_ tableView: UITableView, cellForRowAt ip: IndexPath) -> UITableViewCell {
+        if ip.section == kMessagesSectionIndex {
             return TGExtraHookProxy.buildToggleCell(tableView: tableView, proxy: self)
         }
-        let adj = adjustedIndexPath(indexPath)
-        return tgextra_cellForRow(tableView, cellForRowAt: adj)
+        return tgextra_cellForRow(tableView, cellForRowAt: adjusted(ip))
     }
 
-    // switchKeyForIndexPath — ключ UserDefaults для тоггла
-    @objc func tgextra_switchKey(forIndexPath indexPath: IndexPath) -> String? {
-        if indexPath.section == kMessagesSectionIndex { return kTGExtraShowDeletedMessages }
-        return tgextra_switchKey(forIndexPath: adjustedIndexPath(indexPath))
+    // switchKeyForIndexPath
+    @objc func tgextra_switchKey(forIndexPath ip: IndexPath) -> String? {
+        if ip.section == kMessagesSectionIndex { return kTGExtraShowDeletedMessages }
+        return tgextra_switchKey(forIndexPath: adjusted(ip))
     }
 
     // didSelectRow
-    @objc func tgextra_didSelect(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        if indexPath.section == kMessagesSectionIndex {
-            tableView.deselectRow(at: indexPath, animated: true)
+    @objc func tgextra_didSelect(_ tableView: UITableView, didSelectRowAt ip: IndexPath) {
+        if ip.section == kMessagesSectionIndex {
+            tableView.deselectRow(at: ip, animated: true)
             return
         }
-        tgextra_didSelect(tableView, didSelectRowAt: adjustedIndexPath(indexPath))
+        tgextra_didSelect(tableView, didSelectRowAt: adjusted(ip))
     }
 
-    // MARK: - Helpers
+    // MARK: - Helper
 
-    private func adjustedIndexPath(_ ip: IndexPath) -> IndexPath {
-        let adj = ip.section > kMessagesSectionIndex ? ip.section - 1 : ip.section
-        return IndexPath(row: ip.row, section: adj)
+    private func adjusted(_ ip: IndexPath) -> IndexPath {
+        let s = ip.section > kMessagesSectionIndex ? ip.section - 1 : ip.section
+        return IndexPath(row: ip.row, section: s)
     }
 
-    // MARK: - Построение ячейки
+    // MARK: - Ячейка тоггла
 
     static func buildToggleCell(tableView: UITableView, proxy: TGExtraHookProxy) -> UITableViewCell {
         let id = "TGExtraDeletedMsgCell"
@@ -106,7 +126,7 @@ public func tgextra_installDeletedMessagesHooks() {
         let isOn = UserDefaults.standard.bool(forKey: kTGExtraShowDeletedMessages)
         cell.textLabel?.text = "🗑️ Показывать удалённые сообщения"
         cell.detailTextLabel?.text = isOn
-            ? "Сохраняются как полупрозрачные с иконкой 🗑️"
+            ? "Сохраняются как полупрозрачные с 🗑️"
             : "Выключено"
         cell.detailTextLabel?.textColor = .secondaryLabel
         cell.selectionStyle = .none
@@ -115,23 +135,19 @@ public func tgextra_installDeletedMessagesHooks() {
         toggle.isOn = isOn
         toggle.addTarget(proxy, action: #selector(handleToggle(_:)), for: .valueChanged)
         cell.accessoryView = toggle
-
         return cell
     }
 
     @objc func handleToggle(_ sender: UISwitch) {
-        let newVal = sender.isOn
-        UserDefaults.standard.set(newVal, forKey: kTGExtraShowDeletedMessages)
+        let val = sender.isOn
+        UserDefaults.standard.set(val, forKey: kTGExtraShowDeletedMessages)
+        if val { DeletedMessageHook.shared.install() }
 
-        // При первом включении — устанавливаем хук перехвата
-        if newVal { DeletedMessageHook.shared.install() }
-
-        // Обновляем detail label
         if let tv = sender.tgextra_parentTableView() {
             tv.reloadRows(at: [IndexPath(row: 0, section: kMessagesSectionIndex)], with: .none)
         }
 
-        TGExtraToast.show(newVal
+        TGExtraToast.show(val
             ? "Удалённые сообщения будут сохраняться 🗑️"
             : "Удалённые сообщения больше не сохраняются")
     }
@@ -177,21 +193,10 @@ struct TGExtraToast {
             label.alpha = 0
             window.addSubview(label)
             UIView.animate(withDuration: 0.25, animations: { label.alpha = 1 }) { _ in
-                UIView.animate(withDuration: 0.35, delay: 2.0, animations: { label.alpha = 0 }) { _ in
-                    label.removeFromSuperview()
-                }
+                UIView.animate(withDuration: 0.35, delay: 2.0, animations: {
+                    label.alpha = 0
+                }) { _ in label.removeFromSuperview() }
             }
-        }
-    }
-}
-
-// MARK: - Автоинициализация
-
-@objc class TGExtraDeletedMessagesSetup: NSObject {
-    @objc static func load() {
-        tgextra_installDeletedMessagesHooks()
-        if UserDefaults.standard.bool(forKey: kTGExtraShowDeletedMessages) {
-            DeletedMessageHook.shared.install()
         }
     }
 }
